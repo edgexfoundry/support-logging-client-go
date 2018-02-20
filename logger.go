@@ -27,22 +27,30 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 type LoggingClient struct {
 	owningServiceName string
-	RemoteUrl         string
-	LogFilePath       string
+	remoteEnabled     bool
+	logTarget         string
 	stdOutLogger      *log.Logger
 	fileLogger        *log.Logger
 }
 
 // Create a new logging client for the owning service
-func NewClient(owningServiceName string, remoteUrl string) LoggingClient {
+func NewClient(owningServiceName string, isRemote bool, logTarget string) LoggingClient {
 	// Set up logging client
 	lc := LoggingClient{
 		owningServiceName: owningServiceName,
-		RemoteUrl:         remoteUrl,
+		remoteEnabled:     isRemote,
+		logTarget:         logTarget,
+	}
+
+	//If local logging, verify directory exists
+	if !lc.remoteEnabled {
+		verifyLogDirectory(lc.logTarget)
 	}
 
 	// Set up the loggers
@@ -50,35 +58,50 @@ func NewClient(owningServiceName string, remoteUrl string) LoggingClient {
 	lc.fileLogger = &log.Logger{}
 	lc.fileLogger.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
-	// Default path
-	lc.LogFilePath = ""
-
 	return lc
 }
 
 // Send the log out as a REST request
 func (lc LoggingClient) log(logLevel support_domain.LogLevel, msg string, labels []string) error {
-	// TODO: Find out if the log type is loggable (is it enabled)
 
-	// Save to logging file if path was set
-	lc.saveToLogFile(string(logLevel), msg)
+    if !lc.remoteEnabled {
+		// Save to logging file if path was set
+		return lc.saveToLogFile(string(logLevel), msg)
+	}
 
 	// Send to logging service
 	logEntry := lc.buildLogEntry(logLevel, msg, labels)
 	return lc.sendLog(logEntry)
 }
 
-func (lc LoggingClient) saveToLogFile(prefix string, message string) {
-	if lc.LogFilePath != "" {
-		file, err := os.OpenFile(lc.LogFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		defer file.Close()
-		if err != nil {
-			fmt.Println("Error opening log file: " + err.Error())
-		}
+func (lc LoggingClient) saveToLogFile(prefix string, message string) error {
+	if lc.logTarget == "" {
+		return nil
+	}
 
-		lc.fileLogger.SetOutput(file)
-		lc.fileLogger.SetPrefix(prefix + ": ")
-		lc.fileLogger.Println(message)
+	file, err := os.OpenFile(lc.logTarget, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	defer file.Close()
+	if err != nil {
+		fmt.Println("Error opening log file: " + err.Error())
+		return err
+	}
+
+	lc.fileLogger.SetOutput(file)
+	lc.fileLogger.SetPrefix(prefix + ": ")
+	lc.fileLogger.Println(message)
+
+	return nil
+}
+
+func verifyLogDirectory(path string) {
+	prefix, _ := filepath.Split(path)
+	//If a path to the log file was specified and it does not exist, create it.
+	dir := strings.TrimRight(prefix, "/")
+	if len(dir) > 0 {
+		if _, err := os.Stat(dir); os.IsNotExist(err){
+			fmt.Println("Creating directory: " + dir)
+			os.MkdirAll(dir, 0766)
+		}
 	}
 }
 
@@ -128,7 +151,7 @@ func (lc LoggingClient) buildLogEntry(logLevel support_domain.LogLevel, msg stri
 
 // Send the log as an http request
 func (lc LoggingClient) sendLog(logEntry support_domain.LogEntry) error {
-	if lc.RemoteUrl == "" {
+	if lc.logTarget == "" {
 		return nil
 	}
 
@@ -138,7 +161,7 @@ func (lc LoggingClient) sendLog(logEntry support_domain.LogEntry) error {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", lc.RemoteUrl, bytes.NewBuffer(reqBody))
+	req, err := http.NewRequest("POST", lc.logTarget, bytes.NewBuffer(reqBody))
 	if err != nil {
 		fmt.Println(err.Error())
 		return err
