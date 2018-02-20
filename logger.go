@@ -27,65 +27,84 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 type LoggingClient struct {
-	owningServiceName string
-	RemoteUrl         string
-	LogFilePath       string
-	stdOutLogger      *log.Logger
-	fileLogger        *log.Logger
+	OwningServiceName string
+	RemoteEnabled     bool
+	LogTarget         string
+	StdOutLogger      *log.Logger
+	FileLogger        *log.Logger
 }
 
 // Create a new logging client for the owning service
-func NewClient(owningServiceName string, remoteUrl string) LoggingClient {
+func NewClient(owningServiceName string, isRemote bool, logTarget string) LoggingClient {
 	// Set up logging client
 	lc := LoggingClient{
-		owningServiceName: owningServiceName,
-		RemoteUrl:         remoteUrl,
+		OwningServiceName: owningServiceName,
+		RemoteEnabled:     isRemote,
+		LogTarget:         logTarget,
 	}
 
 	// Set up the loggers
-	lc.stdOutLogger = log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lshortfile)
-	lc.fileLogger = &log.Logger{}
-	lc.fileLogger.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
-
-	// Default path
-	lc.LogFilePath = ""
+	lc.StdOutLogger = log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lshortfile)
+	lc.FileLogger = &log.Logger{}
+	lc.FileLogger.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
 	return lc
 }
 
 // Send the log out as a REST request
 func (lc LoggingClient) log(logLevel support_domain.LogLevel, msg string, labels []string) error {
-	// TODO: Find out if the log type is loggable (is it enabled)
 
-	// Save to logging file if path was set
-	lc.saveToLogFile(string(logLevel), msg)
+    if !lc.RemoteEnabled {
+		// Save to logging file if path was set
+		return lc.saveToLogFile(string(logLevel), msg)
+	}
 
 	// Send to logging service
 	logEntry := lc.buildLogEntry(logLevel, msg, labels)
 	return lc.sendLog(logEntry)
 }
 
-func (lc LoggingClient) saveToLogFile(prefix string, message string) {
-	if lc.LogFilePath != "" {
-		file, err := os.OpenFile(lc.LogFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		defer file.Close()
-		if err != nil {
-			fmt.Println("Error opening log file: " + err.Error())
-		}
+func (lc LoggingClient) saveToLogFile(prefix string, message string) error {
+	if lc.LogTarget == "" {
+		return nil
+	}
 
-		lc.fileLogger.SetOutput(file)
-		lc.fileLogger.SetPrefix(prefix + ": ")
-		lc.fileLogger.Println(message)
+	verifyLogDirectory(lc.LogTarget)
+	file, err := os.OpenFile(lc.LogTarget, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	defer file.Close()
+	if err != nil {
+		fmt.Println("Error opening log file: " + err.Error())
+		return err
+	}
+
+	lc.FileLogger.SetOutput(file)
+	lc.FileLogger.SetPrefix(prefix + ": ")
+	lc.FileLogger.Println(message)
+
+	return nil
+}
+
+func verifyLogDirectory(path string) {
+	prefix, _ := filepath.Split(path)
+	//If a path to the log file was specified and it does not exist, create it.
+	dir := strings.TrimRight(prefix, "/")
+	if len(dir) > 0 {
+		if _, err := os.Stat(dir); os.IsNotExist(err){
+			fmt.Println("Creating directory: " + dir)
+			os.MkdirAll(dir, 0766)
+		}
 	}
 }
 
 // Log an INFO level message
 func (lc LoggingClient) Info(msg string, labels ...string) error {
-	lc.stdOutLogger.SetPrefix("INFO: ")
-	lc.stdOutLogger.Println(msg)
+	lc.StdOutLogger.SetPrefix("INFO: ")
+	lc.StdOutLogger.Println(msg)
 	return lc.log(support_domain.INFO, msg, labels)
 }
 
@@ -96,22 +115,22 @@ func (lc LoggingClient) Trace(msg string, labels ...string) {
 
 // Log a DEBUG level message
 func (lc LoggingClient) Debug(msg string, labels ...string) error {
-	lc.stdOutLogger.SetPrefix("DEBUG: ")
-	lc.stdOutLogger.Println(msg)
+	lc.StdOutLogger.SetPrefix("DEBUG: ")
+	lc.StdOutLogger.Println(msg)
 	return lc.log(support_domain.DEBUG, msg, labels)
 }
 
 // Log a WARN level message
 func (lc LoggingClient) Warn(msg string, labels ...string) error {
-	lc.stdOutLogger.SetPrefix("WARN: ")
-	lc.stdOutLogger.Println(msg)
+	lc.StdOutLogger.SetPrefix("WARN: ")
+	lc.StdOutLogger.Println(msg)
 	return lc.log(support_domain.WARN, msg, labels)
 }
 
 // Log an ERROR level message
 func (lc LoggingClient) Error(msg string, labels ...string) error {
-	lc.stdOutLogger.SetPrefix("ERROR: ")
-	lc.stdOutLogger.Println(msg)
+	lc.StdOutLogger.SetPrefix("ERROR: ")
+	lc.StdOutLogger.Println(msg)
 	return lc.log(support_domain.ERROR, msg, labels)
 }
 
@@ -121,14 +140,14 @@ func (lc LoggingClient) buildLogEntry(logLevel support_domain.LogLevel, msg stri
 	res.Level = logLevel
 	res.Message = msg
 	res.Labels = labels
-	res.OriginService = lc.owningServiceName
+	res.OriginService = lc.OwningServiceName
 
 	return res
 }
 
 // Send the log as an http request
 func (lc LoggingClient) sendLog(logEntry support_domain.LogEntry) error {
-	if lc.RemoteUrl == "" {
+	if lc.LogTarget == "" {
 		return nil
 	}
 
@@ -138,7 +157,7 @@ func (lc LoggingClient) sendLog(logEntry support_domain.LogEntry) error {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", lc.RemoteUrl, bytes.NewBuffer(reqBody))
+	req, err := http.NewRequest("POST", lc.LogTarget, bytes.NewBuffer(reqBody))
 	if err != nil {
 		fmt.Println(err.Error())
 		return err
